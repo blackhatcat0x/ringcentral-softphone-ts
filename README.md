@@ -58,31 +58,6 @@ The credentials data returned by that API is like this:
       "proxyTLS": "sip71.ringcentral.com:5096"
     },
     {
-      "region": "APAC",
-      "proxy": "sip60.ringcentral.com:5090",
-      "proxyTLS": "sip60.ringcentral.com:5096"
-    },
-    {
-      "region": "EMEA",
-      "proxy": "sip30.ringcentral.com:5090",
-      "proxyTLS": "sip30.ringcentral.com:5096"
-    },
-    {
-      "region": "APAC",
-      "proxy": "sip70.ringcentral.com:5090",
-      "proxyTLS": "sip70.ringcentral.com:5096"
-    },
-    {
-      "region": "APAC",
-      "proxy": "sip50.ringcentral.com:5090",
-      "proxyTLS": "sip50.ringcentral.com:5096"
-    },
-    {
-      "region": "NA",
-      "proxy": "SIP10.ringcentral.com:5090",
-      "proxyTLS": "sip10.ringcentral.com:5096"
-    },
-    {
       "region": "NA",
       "proxy": "SIP20.ringcentral.com:5090",
       "proxyTLS": "sip20.ringcentral.com:5096"
@@ -92,6 +67,7 @@ The credentials data returned by that API is like this:
       "proxy": "sip80.ringcentral.com:5090",
       "proxyTLS": "sip80.ringcentral.com:5096"
     }
+    ...
   ],
   "userName": "16501234567",
   "password": "password",
@@ -259,6 +235,16 @@ callSession1.on("rtpPacket", (rtpPacket: RtpPacket) => {
   }
 });
 ```
+
+## Telephony Session ID
+
+For outbound calls, you will be able to find header like this
+`p-rc-api-ids: party-id=p-a0d17e323f0fez1953f50f90dz296e3440000-1;session-id=s-a0d17e323f0fez1953f50f90dz296e3440000`
+from `callSession.sipMessage.headers`.
+
+However, for inbound calls, the server doesn't tell us anything about the
+Telephony Session ID. Here is a workaround solution:
+https://github.com/tylerlong/rc-softphone-call-id-test
 
 ---
 
