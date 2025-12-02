@@ -17,7 +17,6 @@ softphone.enableDebugMode(); // print all SIP messages
 
 const main = async () => {
   await softphone.register();
-  await waitFor({ interval: 1000 });
   // callee format sample: 16506668888, country code is required, otherwise behavior is undefined
   const callSession = await softphone.call(process.env.CALLEE_FOR_TESTING!);
 
@@ -26,7 +25,7 @@ const main = async () => {
   });
 
   // callee answers the call
-  callSession.once("answered", () => {
+  callSession.once("answered", async () => {
     // receive audio
     const writeStream = fs.createWriteStream(`${callSession.callId}.wav`, {
       flags: "a",
@@ -39,9 +38,9 @@ const main = async () => {
       writeStream.close();
     });
 
-    // call transfer
+    // // call transfer
     // await waitFor({ interval: 3000 });
-    // callSession.transfer(process.env.ANOTHER_CALLEE_FOR_TESTING!);
+    // await callSession.transfer(process.env.ANOTHER_CALLEE_FOR_TESTING!);
 
     // // send audio to remote peer
     // const streamer = callSession.streamAudio(

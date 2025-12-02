@@ -6,6 +6,17 @@ the
 
 Users are recommended to use this SDK instead of the JavaScript SDK.
 
+This SDK allows you to create a softphone without GUI that runs on server-side
+without a web browser.
+
+## New documentation and new name
+
+New documentation is available here:
+https://ringcentral.github.io/ringcentral-softphone-ts/
+
+We are renaming this SDK to **RingCentral Cloud Phone SDK**, and it is currently
+a work in progress.
+
 ## Installation
 
 ```
@@ -19,18 +30,38 @@ yarn install ringcentral-softphone
 1. Login to https://service.ringcentral.com
 2. Find the user/extension you want to use
 3. Check the user's "Devices & Numbers"
-4. Find a phone/device that you want to use
-5. if there is none, you need to create one. Check steps below for more details
-6. Click the "Set Up and Provision" button
-7. Click the link "Set up manually using SIP"
-8. You will find "SIP Domain", "Outbound Proxy", "User Name", "Password" and
+4. Find a phone/device that you want to use (Phone type **must** be "Existing
+   Phone"), if there is none, you need to create one.
+5. Click the "Set Up and Provision" button
+6. Click the link "Set up manually using SIP"
+7. You will find "SIP Domain", "Outbound Proxy", "User Name", "Password" and
    "Authorization ID"
 
 Please note that, "SIP Domain" name should come without port number. I don't
 know why it shows a port number on the page. This SDK requires a "domain" which
 is "SIP Domain" but without the port number.
 
+Please also note that, not every device/phone can be used with the softphone
+SDK. Some phones/devices with type "RingCentral Phone app" cannot be used with
+the softphone SDK. You will need to have a device/phone with type **"Exsting
+Phone"**.
+
 ### Programmatically
+
+Invoke this API to list all devices under an extension:
+https://developers.ringcentral.com/api-reference/Devices/listExtensionDevices
+
+Please note that, not every device can be used for this softphone SDK. You will
+need to find an device with **`type: 'OtherPhone'`**. Devices with
+`type: 'SoftPhone'` can **NOT** be used for this softphone SDK.
+
+I know this is confusing. `type: 'SoftPhone'` in API response is the same as
+`type = "RingCentral Phone app"` in the GUI (mentioned in the Manually section
+above). `type: 'OtherPhone'` in API response is the same as
+`type = "Exiting Phone"` in the GUI.
+
+If you cannot find an appropriate device, you will need to create a device
+manually. Please refer to the previous section.
 
 Invoke this RESTful API:
 https://developers.ringcentral.com/api-reference/Devices/readDeviceSipInfo
@@ -91,9 +122,16 @@ const softphone = new Softphone({
   password: process.env.SIP_INFO_PASSWORD,
   authorizationId: process.env.SIP_INFO_AUTHORIZATION_ID,
 });
+await softphone.register();
 ```
 
 For complete examples, see [demos/](demos/)
+
+## Debug mode
+
+```ts
+softphone.enableDebugMode(); // print all SIP messages
+```
 
 ## Supported features
 
@@ -101,12 +139,133 @@ For complete examples, see [demos/](demos/)
 - outbound call
 - inbound DTMF
 - outbound DTMF
-- reject inbound call
+- decline inbound call
 - cancel outbound call
 - hang up ongoing call
 - receive audio stream from peer
 - stream local audio to remote peer
 - call transfer
+- hold / unhold
+
+## inbound call
+
+```ts
+softphone.on("invite", async (inviteMessage) => {
+});
+```
+
+## outbound call
+
+```ts
+const callSession = await softphone.call("12345678987");
+```
+
+## outbound DTMF
+
+```ts
+callSession.sendDTMF("1");
+```
+
+### A sugar method to send DTMFs
+
+```ts
+await callSession.sendDTMFs("101#", 500);
+```
+
+It will send four chars (1,0,1,#) one by one. After sending each one, it will
+pause for 500ms.
+
+## inbound DTMF
+
+```ts
+callSession.on("dtmf", (digit) => {
+  console.log("dtmf", digit);
+});
+```
+
+## decline inbound call
+
+```ts
+softphone.on("invite", async (inviteMessage) => {
+  // decline the call
+  // await waitFor({ interval: 1000 });
+  await softphone.decline(inviteMessage);
+}
+```
+
+## cancel outbound call
+
+```ts
+callSession.cancel();
+```
+
+This should be invoked BEFORE the call is answered
+
+## hang up ongoing call
+
+```ts
+callSession.hangup();
+```
+
+## receive audio stream from peer
+
+```ts
+const writeStream = fs.createWriteStream(`${callSession.callId}.wav`, {
+  flags: "a",
+});
+callSession.on("audioPacket", (rtpPacket: RtpPacket) => {
+  writeStream.write(rtpPacket.payload);
+});
+// either you or the peer hang up
+callSession.once("disposed", () => {
+  writeStream.close();
+});
+```
+
+## stream local audio to remote peer
+
+```ts
+// send audio to remote peer
+const streamer = callSession.streamAudio(
+  fs.readFileSync("demos/opus-48000-2.wav"),
+);
+// You may subscribe to the 'finished' event of the streamer to know when the audio sending is finished
+streamer.once("finished", () => {
+  console.log("audio sending finished");
+});
+
+// // You may loop the streaming:
+// streamer.on("finished", () => {
+//   streamer.start();
+// })
+
+// // you may pause/resume/stop audio sending at any time
+// await waitFor({ interval: 3000 });
+// streamer.pause();
+// await waitFor({ interval: 3000 });
+// streamer.resume();
+// await waitFor({ interval: 2000 });
+// streamer.stop();
+
+// // you may start/restart the streaming:
+// streamer.start();
+```
+
+## call transfer
+
+```ts
+await callSession.transfer("12345678987");
+```
+
+## hold / unhold
+
+```ts
+await callSession.hold();
+await callSession.unhold();
+```
+
+Please note that, if you are streaming audio to remote peer, you may want to
+pause the streaming when the call is on hold.
 
 ## Audio codec
 
@@ -236,15 +395,49 @@ callSession1.on("rtpPacket", (rtpPacket: RtpPacket) => {
 });
 ```
 
-## Telephony Session ID
+## Telephony Session ID (& Call Party ID)
 
 For outbound calls, you will be able to find header like this
 `p-rc-api-ids: party-id=p-a0d17e323f0fez1953f50f90dz296e3440000-1;session-id=s-a0d17e323f0fez1953f50f90dz296e3440000`
-from `callSession.sipMessage.headers`.
+from `outbounCallSession.sipMessage.headers`. I have added two sugar methods:
+`outboundCallSession.sessionId` and `outboundCallSession.partyId`.
 
-However, for inbound calls, the server doesn't tell us anything about the
-Telephony Session ID. Here is a workaround solution:
-https://github.com/tylerlong/rc-softphone-call-id-test
+However, for inbound calls, the SIP server doesn't tell us anything about the
+Telephony Session ID. You may use
+[this workaround](https://github.com/tylerlong/rc-softphone-call-id-test).
+
+## 🔧 `ignoreTlsCertErrors` (optional)
+
+Most developers **do not need this option**.
+
+However, in rare cases — such as testing in a **lab or development environment**
+with self-signed or improperly configured TLS certificates — you may encounter
+certificate validation errors when establishing a TLS connection.
+
+To bypass these errors, you can set the `ignoreTlsCertErrors` flag to `true`:
+
+```ts
+const softphone = new Softphone({
+  ...
+  ignoreTlsCertErrors: true
+});
+```
+
+> ⚠️ Warning: Enabling this option disables certificate verification and makes
+> the TLS connection vulnerable to man-in-the-middle (MITM) attacks. Use only in
+> trusted, controlled environments — never in production.
+
+## Troubleshooting (Common issues)
+
+### `SIP/2.0 486 Busy Here` for outbound call
+
+First of all, make sure that the target number is valid. If the target number is
+invalid, you will get `SIP/2.0 486 Busy Here`.
+
+Secondly, make sure that the device has a "Emergency Address" configured and
+there is no complains about Emergency address by checking the details of the
+device on https://service.ringcentral.com. It is an known issue that, if the
+Emergency Address is not configured properly, outbound call will not work.
 
 ---
 
@@ -260,6 +453,25 @@ Content below is for the maintainer/contributor of this SDK.
 - Caller Id feature is not supported. `P-Asserted-Identity` doesn't work. I
   think it is by design, since hardphone cannot support it.
 
+## Conferences
+
+Conference involves RESTful API which is out of scope of this SDK. With this
+being said, this SDK works well with conferences. Here is a
+[demo project for this SDK work with conferences](https://github.com/tylerlong/softphone-invite-agent-to-conference-demo).
+The demo is about making a call to a call queue number, it would be even simpler
+if there is no call queue.
+
 #### Code style
 
 We use `deno fmt && deno lint --fix` to format and lint all code.
+
+#### Docs
+
+All docs related files are located in `mkdocs` folder.
+
+You will need to setup Python environment and install everything in
+`mkdocs/requirements.txt`.
+
+Serve the docs locally: `mkdocs serve -f mkdocs/mkdocs.yml`.
+
+Deploy the docs: `mkdocs gh-deploy -f mkdocs/mkdocs.yml`

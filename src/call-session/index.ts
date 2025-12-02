@@ -11,8 +11,9 @@ import {
   ResponseMessage,
 } from "../sip-message/index.js";
 import type Softphone from "../index.js";
-import { branch, localKey, randomInt } from "../utils.js";
+import { branch, extractAddress, localKey, randomInt } from "../utils.js";
 import Streamer from "./streamer.js";
+import waitFor from "wait-for-async";
 
 abstract class CallSession extends EventEmitter {
   public softphone: Softphone;
@@ -26,6 +27,7 @@ abstract class CallSession extends EventEmitter {
   public srtpSession!: SrtpSession;
   public encoder: { encode: (pcm: Buffer) => Buffer };
   public decoder: { decode: (audio: Buffer) => Buffer };
+  public sdp!: string;
 
   // for audio streaming
   public ssrc = randomInt();
@@ -60,7 +62,7 @@ abstract class CallSession extends EventEmitter {
   }
 
   public get callId() {
-    return this.sipMessage.headers["Call-ID"];
+    return this.sipMessage.getHeader("Call-ID");
   }
 
   public send(data: string | Buffer) {
@@ -106,6 +108,13 @@ abstract class CallSession extends EventEmitter {
       rtpHeader.sequenceNumber = sequenceNumber++;
       const rtpPacket = new RtpPacket(rtpHeader, payload);
       this.send(this.srtpSession.encrypt(rtpPacket.payload, rtpPacket.header));
+    }
+  }
+
+  public async sendDTMFs(s: string, delay = 500) {
+    for (const c of s) {
+      this.sendDTMF(c as any);
+      await waitFor({ interval: delay });
     }
   }
 
@@ -156,7 +165,7 @@ abstract class CallSession extends EventEmitter {
           rtpPacket.payload = this.decoder.decode(rtpPacket.payload);
           this.emit("audioPacket", rtpPacket);
         } catch {
-          console.error("opus decode failed", rtpPacket);
+          console.error("Audio packet decode failed", rtpPacket);
         }
       }
     });
@@ -168,7 +177,7 @@ abstract class CallSession extends EventEmitter {
     this.send("hello");
 
     const byeHandler = (inboundMessage: InboundMessage) => {
-      if (inboundMessage.headers["Call-ID"] !== this.callId) {
+      if (inboundMessage.getHeader("Call-ID") !== this.callId) {
         return;
       }
       if (inboundMessage.headers.CSeq.endsWith(" BYE")) {
@@ -187,7 +196,7 @@ abstract class CallSession extends EventEmitter {
     this.socket?.close();
   }
 
-  public transfer(transferTo: string) {
+  public async transfer(transferTo: string) {
     const requestMessage = new RequestMessage(
       `REFER sip:${this.softphone.sipInfo.username}@${this.softphone.sipInfo.outboundProxy};transport=tls SIP/2.0`,
       {
@@ -209,19 +218,63 @@ abstract class CallSession extends EventEmitter {
           `<sip:${this.softphone.sipInfo.username}@${this.softphone.sipInfo.domain}>`,
       },
     );
-    this.softphone.send(requestMessage);
-    // reply to those NOTIFY messages
-    const notifyHandler = (inboundMessage: InboundMessage) => {
-      if (!inboundMessage.subject.startsWith("NOTIFY ")) {
-        return;
-      }
-      const responseMessage = new ResponseMessage(inboundMessage, 200);
-      this.softphone.send(responseMessage);
-      if (inboundMessage.body.trim() === "SIP/2.0 200 OK") {
-        this.softphone.off("message", notifyHandler);
-      }
-    };
-    this.softphone.on("message", notifyHandler);
+    await this.softphone.send(requestMessage);
+
+    return new Promise<void>((resolve) => {
+      const notifyHandler = (inboundMessage: InboundMessage) => {
+        if (!inboundMessage.subject.startsWith("NOTIFY ")) {
+          return;
+        }
+        const responseMessage = new ResponseMessage(inboundMessage, 200);
+        this.softphone.send(responseMessage);
+        if (inboundMessage.body.trim() === "SIP/2.0 200 OK") {
+          this.softphone.off("message", notifyHandler);
+          resolve();
+        }
+      };
+      this.softphone.on("message", notifyHandler);
+    });
+  }
+
+  public async toggleReceive(toReceive: boolean) {
+    let newSDP = this.sdp;
+    if (!toReceive) {
+      newSDP = newSDP.replace(/a=sendrecv/, "a=sendonly");
+    }
+    const requestMessage = new RequestMessage(
+      `INVITE ${extractAddress(this.remotePeer)} SIP/2.0`,
+      {
+        "Call-Id": this.callId,
+        From: this.localPeer,
+        To: this.remotePeer,
+        Via:
+          `SIP/2.0/TLS ${this.softphone.client.localAddress}:${this.softphone.client.localPort};rport;branch=${branch()};alias`,
+        "Content-Type": "application/sdp",
+        Contact:
+          ` <sip:${this.softphone.sipInfo.username}@${this.softphone.client.localAddress}:${this.softphone.client.localPort};transport=TLS;ob>`,
+      },
+      newSDP,
+    );
+    const replyMessage = await this.softphone.send(requestMessage, true);
+    const ackMessage = new RequestMessage(
+      `ACK ${extractAddress(this.remotePeer)} SIP/2.0`,
+      {
+        "Call-Id": this.callId,
+        From: this.localPeer,
+        To: this.remotePeer,
+        Via: replyMessage.headers.Via,
+        CSeq: replyMessage.headers.CSeq.replace(" INVITE", " ACK"),
+      },
+    );
+    await this.softphone.send(ackMessage);
+  }
+
+  public async hold() {
+    return this.toggleReceive(false);
+  }
+
+  public async unhold() {
+    return this.toggleReceive(true);
   }
 }
 

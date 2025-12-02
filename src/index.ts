@@ -2,6 +2,7 @@ import EventEmitter from "node:events";
 import tls, { TLSSocket } from "node:tls";
 
 import waitFor from "wait-for-async";
+import Mixpanel from "mixpanel";
 
 import InboundCallSession from "./call-session/inbound.js";
 import OutboundCallSession from "./call-session/outbound.js";
@@ -21,6 +22,8 @@ import {
 import { SoftPhoneOptions } from "./types.js";
 import Codec from "./codec.js";
 
+const mp = Mixpanel.init("0a22181a3a5f16b7938e5d3277b7f96a");
+
 class Softphone extends EventEmitter {
   public sipInfo: SoftPhoneOptions;
   public client: TLSSocket;
@@ -29,10 +32,14 @@ class Softphone extends EventEmitter {
   public fakeDomain = uuid() + ".invalid";
   public fakeEmail = uuid() + "@" + this.fakeDomain;
 
-  private intervalHandle: NodeJS.Timeout;
+  private intervalHandle?: NodeJS.Timeout;
   private connected = false;
 
   public constructor(sipInfo: SoftPhoneOptions) {
+    mp.track("init", {
+      distinct_id: sipInfo.username,
+      version: "1.1.11",
+    });
     super();
     if (sipInfo.codec === undefined) {
       sipInfo.codec = "OPUS/16000";
@@ -47,7 +54,11 @@ class Softphone extends EventEmitter {
     }
     const tokens = this.sipInfo.outboundProxy!.split(":");
     this.client = tls.connect(
-      { host: tokens[0], port: parseInt(tokens[1], 10) },
+      {
+        host: tokens[0],
+        port: parseInt(tokens[1], 10),
+        rejectUnauthorized: !this.sipInfo.ignoreTlsCertErrors,
+      },
       () => {
         this.connected = true;
       },
@@ -80,7 +91,14 @@ class Softphone extends EventEmitter {
 
   public async register() {
     if (!this.connected) {
-      await waitFor({ interval: 100, condition: () => this.connected });
+      await waitFor({
+        interval: 100,
+        times: 100,
+        condition: () => this.connected,
+      });
+      if (!this.connected) {
+        throw new Error("Failed to register: connect to TLS timeout");
+      }
     }
     const sipRegister = async () => {
       const fromTag = uuid();
@@ -106,8 +124,7 @@ class Softphone extends EventEmitter {
         // sometimes the server will return 200 OK directly
         return;
       }
-      const wwwAuth = inboundMessage.headers["Www-Authenticate"] ||
-        inboundMessage!.headers["WWW-Authenticate"];
+      const wwwAuth = inboundMessage.getHeader("Www-Authenticate")!;
       const nonce = wwwAuth.match(/, nonce="(.+?)"/)![1];
       const newMessage = requestMessage.fork();
       newMessage.headers.Authorization = generateAuthorization(
@@ -115,14 +132,17 @@ class Softphone extends EventEmitter {
         nonce,
         "REGISTER",
       );
-      this.send(newMessage);
+      const message = await this.send(newMessage, true);
+      if (!message.subject.startsWith("SIP/2.0 200 ")) {
+        throw new Error("Failed to register: " + message.subject);
+      }
     };
-    sipRegister();
+    await sipRegister();
     this.intervalHandle = setInterval(
       () => {
         sipRegister();
       },
-      3 * 60 * 1000, // refresh registration every 3 minutes
+      30 * 1000, // refresh registration every 30 seconds
     );
     this.on("message", (inboundMessage) => {
       if (!inboundMessage.subject.startsWith("INVITE sip:")) {
@@ -130,7 +150,7 @@ class Softphone extends EventEmitter {
       }
       const outboundMessage = new OutboundMessage("SIP/2.0 100 Trying", {
         Via: inboundMessage.headers.Via,
-        "Call-ID": inboundMessage.headers["Call-ID"],
+        "Call-ID": inboundMessage.getHeader("Call-ID"),
         From: inboundMessage.headers.From,
         To: inboundMessage.headers.To,
         CSeq: inboundMessage.headers.CSeq,
@@ -218,7 +238,7 @@ a=sendrecv
 a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:${localKey}
   `.trim();
     const inviteMessage = new RequestMessage(
-      `INVITE sip:${callee} SIP/2.0`,
+      `INVITE sip:${callee}@${this.sipInfo.domain} SIP/2.0`,
       {
         Via:
           `SIP/2.0/TLS ${this.client.localAddress}:${this.client.localPort};rport;branch=${branch()};alias`,
@@ -240,7 +260,7 @@ a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:${localKey}
       offerSDP,
     );
     const inboundMessage = await this.send(inviteMessage, true);
-    const proxyAuthenticate = inboundMessage.headers["Proxy-Authenticate"];
+    const proxyAuthenticate = inboundMessage.getHeader("Proxy-Authenticate")!;
     const nonce = proxyAuthenticate.match(/, nonce="(.+?)"/)![1];
     const newMessage = inviteMessage.fork();
     newMessage.headers["Proxy-Authorization"] = generateAuthorization(
@@ -249,7 +269,9 @@ a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:${localKey}
       "INVITE",
     );
     const progressMessage = await this.send(newMessage, true);
-    return new OutboundCallSession(this, progressMessage);
+    const outboundCallSession = new OutboundCallSession(this, progressMessage);
+    outboundCallSession.sdp = offerSDP;
+    return outboundCallSession;
   }
 }
 
